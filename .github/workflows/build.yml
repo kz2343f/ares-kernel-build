@@ -1,1 +1,92 @@
+name: Build ares kernel with KALLSYMS_ALL
 
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+
+    steps:
+    - name: Checkout kernel source
+      uses: actions/checkout@v4
+      with:
+        repository: xiaomi-mt6893-dev/kernel_xiaomi_mt6893
+        ref: lineage-23.2
+        path: kernel
+        fetch-depth: 1
+
+    - name: Install dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev \
+          python3 python-is-python3 git curl wget zip unzip cpio rsync ccache \
+          device-tree-compiler lz4 xz-utils zstd liblz4-tool libncurses5 \
+          android-sdk-libsparse-utils
+
+    - name: Patch ares_defconfig (KALLSYMS_ALL + KPROBES + disable KSU/SUSFS)
+      working-directory: kernel
+      run: |
+        DEFCONFIG="arch/arm64/configs/ares_defconfig"
+        echo "=== BEFORE ==="
+        grep -E "KALLSYMS|KSU|KPROBES" "$DEFCONFIG" || echo "(none)"
+
+        # Tat KSU va SUSFS neu co
+        sed -i 's/^CONFIG_KSU=y/# CONFIG_KSU is not set/' "$DEFCONFIG" || true
+        sed -i 's/^CONFIG_KSU_SUSFS=y/# CONFIG_KSU_SUSFS is not set/' "$DEFCONFIG" || true
+        sed -i 's/^CONFIG_KSU_SUSFS_.*=y/# &/' "$DEFCONFIG" || true
+        sed -i 's/^CONFIG_KSU_MANUAL_HOOK=y/# CONFIG_KSU_MANUAL_HOOK is not set/' "$DEFCONFIG" || true
+
+        # Xoa cac dong KALLSYMS cu (ca comment lan gia tri)
+        sed -i '/^CONFIG_KALLSYMS=/d' "$DEFCONFIG"
+        sed -i '/^# CONFIG_KALLSYMS is not set/d' "$DEFCONFIG"
+        sed -i '/^CONFIG_KALLSYMS_ALL=/d' "$DEFCONFIG"
+        sed -i '/^# CONFIG_KALLSYMS_ALL is not set/d' "$DEFCONFIG"
+
+        # Them 2 dong bat buoc cho APatch
+        echo "CONFIG_KALLSYMS=y" >> "$DEFCONFIG"
+        echo "CONFIG_KALLSYMS_ALL=y" >> "$DEFCONFIG"
+
+        # KPROBES (cho mot so KPM)
+        sed -i '/^# CONFIG_KPROBES is not set/d' "$DEFCONFIG"
+        sed -i '/^CONFIG_KPROBES=/d' "$DEFCONFIG"
+        echo "CONFIG_KPROBES=y" >> "$DEFCONFIG"
+
+        echo ""
+        echo "=== AFTER ==="
+        grep -E "KALLSYMS|KSU|KPROBES" "$DEFCONFIG"
+
+    - name: Build kernel (dung build.sh chinh thuc cua source)
+      working-directory: kernel
+      run: |
+        chmod +x build.sh
+        bash build.sh ares
+
+    - name: Verify config_final
+      working-directory: kernel
+      run: |
+        echo "=== Verify out/.config ==="
+        grep -E "^CONFIG_KALLSYMS=" out/.config || echo "MISSING KALLSYMS"
+        grep -E "^CONFIG_KALLSYMS_ALL=" out/.config || echo "MISSING KALLSYMS_ALL"
+        grep -E "^CONFIG_KPROBES=" out/.config || echo "MISSING KPROBES"
+        grep -E "^CONFIG_KSU" out/.config || echo "(KSU off - ok)"
+
+    - name: Package output
+      working-directory: kernel
+      run: |
+        mkdir -p ../artifacts
+        cp out/arch/arm64/boot/Image.gz ../artifacts/ 2>/dev/null || true
+        cp out/.config ../artifacts/config_final.txt
+        cp HydrogenKernel-ares-*.zip ../artifacts/ 2>/dev/null || echo "(khong co zip)"
+        cp out/System.map ../artifacts/ 2>/dev/null || true
+        ls -lah ../artifacts/
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ares-kernel-kallsyms-all
+        path: artifacts/
+        retention-days: 30
